@@ -8,7 +8,7 @@ CONFIG = {
         "asset_price_format": "{ASSET}_{FEATURE}",
         "pair_feature_format": "{ASSET1}_{ASSET2}_{FEATURE}",
         "timestamp_col": "timestamp",
-        "sampling": "1m",
+        "sampling": "1m",  # Base sampling rate of the raw data
         "features": {
             "file_id": "1OCqEkOWV73Z8e-67fpqVL3r3ugVcfml8",
             "file_name": "bin_futures_full_features",
@@ -24,27 +24,61 @@ CONFIG = {
 
     "ENV": {
         "include_cash": True,
-        "action_space_type": "continuous",  # "continuous" or "discrete"
+        "beta_adjusted_portfolio": False,
 
-        # 21 discrete actions with 0.1 steps from -1.0 to 1.0
-        "discrete_actions": [-1.0, -0.9, -0.8, -0.7, -0.6, 
-                             -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 
-                             0.1, 0.2, 0.3, 0.4, 0.5, 
+        # ----- Frequency Configuration -----
+        # Base frequency of raw data; experiments resample from this
+        "frequency": ["1m", "5m", "30m"],  # Frequencies for multi-frequency experiment
+
+        "action_space_type": "continuous",
+        "discrete_actions": [-1.0, -0.9, -0.8, -0.7, -0.6,
+                             -0.5, -0.4, -0.3, -0.2, -0.1, 0.0,
+                             0.1, 0.2, 0.3, 0.4, 0.5,
                              0.6, 0.7, 0.8, 0.9, 1.0],
+
         "trading_window_days": "1D",
         "sliding_window_step": "1D",
-        "lookback_window": 60, # context
+        "lookback_window": 60,
+        # Optional per-frequency lookback override.
+        # Falls back to lookback_window when a frequency key is missing.
+        "lookback_window_map": {
+            "1m": 60,
+            "5m": 30,
+            "30m": 10,
+        },
+
+        # ----- Episode Configuration (NEW) -----
+        # Fixed-length episodes ensure uniform data coverage and consistent gradient signal
+        "episode_length": None,  # None = auto-calculate from frequency (1 week worth of bars)
+        "episode_length_map": {   # Bars per episode by frequency (≈1 week each)
+            "1m":  10080,         # 7 * 24 * 60
+            "5m":  2016,          # 7 * 24 * 12
+            "15m": 672,           # 7 * 24 * 4
+            "30m": 336,           # 7 * 24 * 2
+            "1h":  168,           # 7 * 24
+            "1d":  7,
+        },
+
+        # ----- Transaction Costs -----
         "transaction_costs": {
-            "fee_structures": [0.0, 1.44, 4.5], # in bps: 0.0%, 0.0144%, 0.045%
-            "taker_bps": 0, # fee based on hyperliquid tier system (0.0144% to 0.045%)
-            "maker_bps": 1.0, # rebates (not implemented)
-            "slippage_bps": 0, # slippage
+            "maker_fee_structures": [0.0, 1.7, 5],
+            "taker_bps": 0,
+            "slippage_bps": 0,
+            # Vol-dependent slippage parameters (NEW)
+            "base_slippage_bps": 0.5,        # Base slippage in bps
+            "vol_slippage_multiplier": 2.0,   # How much volatility amplifies slippage
         },
+
+        # ----- Reward Configuration -----
         "reward": {
-            "lambda_basic": 0.01,  # Risk penalty for basic reward system
-            "lambda_utility": 6,  # Risk penalty for utility-based reward system
-            "reward_clip": 3.0,  # Clip rewards to prevent extreme values causing NaN
+            "type": "sharpe",                 # "sharpe" (differential Sharpe) or "utility" (quadratic)
+            "sharpe_eta": 0.01,               # Adaptation rate for differential Sharpe ratio
+            "lambda_basic": 0.01,
+            "lambda_utility": 6,
+            "reward_clip": 3.0,
+            "reward_scale": 10000,            # Scale factor for raw returns before reward computation
         },
+
         "seed": 42,
     },
 
@@ -52,78 +86,81 @@ CONFIG = {
         "data_start": "2024-05-01",
         "data_end": "2025-04-30",
 
-        "train": ["2024-05-01 00:00:00", "2024-12-31 23:59:59"],  # 8 months for training (66.7% of data)
-        "val": ["2025-01-01 00:00:00", "2025-02-28 23:59:59"],    # 2 months for validation (16.7% of data)
-        "test": ["2025-03-01 00:00:00", "2025-04-30 23:59:59"],   # 2 months for testing (16.7% of data)
-
-        #"test": ["2024-05-01 00:00:00", "2024-06-30 23:59:59"],   # 2 months for testing (16.7% of data)
-        #"train": ["2024-07-01 00:00:00", "2025-02-28 23:59:59"],  # 8 months for training (66.7% of data)
-        #"val": ["2025-03-01 00:00:00", "2025-04-30 23:59:59"],    # 2 months for validation (16.7% of data)
+        "train": ["2024-05-01 00:00:00", "2024-12-31 23:59:59"],
+        "val":   ["2025-01-01 00:00:00", "2025-02-28 23:59:59"],
+        "test":  ["2025-03-01 00:00:00", "2025-04-30 23:59:59"],
     },
 
     "RL": {
-        # ===== General (All Algorithms)    =====
-        "algorithm": "PPO",  # "SAC", "PPO", or "DQN" (to be matched with action_space_type)
-        "timesteps": 2e6,  # Total training timesteps (2e6 - 4e6)
-        "policy": "MlpPolicy",  # Policy network architecture
-        "gamma": 0.99,  # Discount factor for future rewards
-        "learning_rate": 3e-4,  # Learning rate for optimizer (standard for PPO)
-        "batch_size": 128,  # Batch size for training updates (must be power of 2)
-        
-        # -----         On-Policy           -----
+        # ===== General =====
+        "algorithm": "PPO",
+        "timesteps": 2e5,
+        "policy": "MlpPolicy",  # Will be overridden to use CNN extractor
+        "gamma": 0.995,
+        "learning_rate": 3e-4,
+        "batch_size": 128,
 
-        # The agent learns from data collected by its current policy
-        # A policy defines the agent's behavior at a given time
+        # ===== PPO =====
+        "gae_lambda": 0.95,
+        "clip_range": 0.2,
+        "clip_range_vf": 0.2,        # NEW: clip value function too
+        "n_steps": 2048,
+        "n_epochs": 10,
+        "ent_coef": 0.05,            # Start moderate, anneal via callback
+        "vf_coef": 0.5,
+        "max_grad_norm": 0.5,
+        "use_sde": True,
+        "sde_sample_freq": -1,
 
-        # =====         PPO (Continuous)    =====
-        "gae_lambda": 0.95,  # GAE lambda for advantage estimation
-        "clip_range": 0.2,  # PPO clipping range for policy updates (standard default)
-        "n_steps": 2048,  # Number of steps to collect before update (MUST be divisible by batch_size)
-        "n_epochs": 10,  # INCREASED: More epochs per batch for better learning
-        "ent_coef": 0.1,  # INCREASED: Higher entropy for more exploration
-        "vf_coef": 0.5,  # Value function loss coefficient
-        "max_grad_norm": 0.5,  # Maximum gradient norm for clipping (reduced from 1.0 to prevent large updates)
-        "use_sde": True,  # Use State Dependent Exploration for continuous action noise
-        "sde_sample_freq": -1,  # CHANGED: Sample new noise every step for maximum exploration
-        
-        # -----         Off-Policy          -----
-        # It means the agent learns from data collected by a different policy than its current one
-        # This allows the use of experience replay buffers to learn from past experiences
-        # Off policy means algorithms like SAC and DQN
+        # ===== Off-Policy (SAC / DQN) =====
+        "buffer_size": 200000,
+        "learning_starts": 5000,
+        "tau": 0.005,
+        "train_freq": 1,
+        "gradient_steps": 1,
+        "ent_coef_SAC": "auto",
+        "exploration_fraction": 0.1,
+        "exploration_initial_eps": 1.0,
+        "exploration_final_eps": 0.05,
+        "target_update_interval": 1,
 
-        "buffer_size": 200000,  # Larger replay buffer for more diverse experiences
-        "learning_starts": 5000,  # Collect more random experiences before learning
-        "tau": 0.005,  # Soft update coefficient for target networks
-        "train_freq": 1,  # Update model every N steps
-        "gradient_steps": 1,  # Gradient steps per environment step
+        # ===== Feature Extractor (NEW) =====
+        "feature_extractor": "cnn",   # "cnn" or "mlp"
+        "cnn_features_dim": 128,      # Output dim of CNN feature extractor
+        "net_arch_pi": [64, 64],      # Policy network hidden layers
+        "net_arch_vf": [64, 64],      # Value function hidden layers
 
-        # =====         SAC (Continuous)    =====
-        "ent_coef_SAC": "auto",  # Automatic entropy tuning for better exploration
-        
-        # =====         DQN (Discrete)      =====
-        # "buffer_size": 100000,  # Replay buffer size (shared with SAC)
-        # "learning_starts": 1000,  # Steps before learning starts (shared with SAC)
-        "exploration_fraction": 0.1,  # Fraction of training for epsilon decay
-        "exploration_initial_eps": 1.0,  # Initial epsilon for exploration
-        "exploration_final_eps": 0.05,  # Final epsilon after decay
-        "target_update_interval": 1,  # Update target network every N steps
+        # ===== VecNormalize (NEW) =====
+        "normalize_obs": True,
+        "normalize_reward": True,
+        "clip_obs": 10.0,
     },
 
     "EVAL": {
-        # Plotting and reporting settings
         "plots": True,
         "reports_dir": "./reports",
-
-        # RL evaluation settings
-        "frequency": 14400,  # Evaluation frequency in timesteps
-        "n_eval_episodes": 3,  # Number of episodes per evaluation
-        "save_freq": 144000, # Save model every N timesteps
-        "action_std_threshold": 0.01,  # Threshold for action std to consider policy collapsed
-        "action_extreme_threshold": 1,  # Threshold for extreme actions to consider policy collapsed
+        "frequency": 14400,
+        "n_eval_episodes": 3,
+        "save_freq": 144000,
+        "action_std_threshold": 0.01,
+        "action_extreme_threshold": 1,
     },
-    
+
     "IO": {
         "models_dir": "./models",
         "tb_logdir": "./tb_logs",
     },
+}
+
+
+# ============================================================================
+# Annualization factors for different timeframes
+# ============================================================================
+ANNUALIZATION = {
+    "1m":  365 * 24 * 60,
+    "5m":  365 * 24 * 12,
+    "15m": 365 * 24 * 4,
+    "30m": 365 * 24 * 2,
+    "1h":  365 * 24,
+    "1d":  365,
 }
