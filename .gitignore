@@ -29,7 +29,7 @@ data_production/
 .csv
 
 # macOS
-.DS_Store
+**/.DS_Store
 
 # Windows
 Thumbs.db
